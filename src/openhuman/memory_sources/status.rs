@@ -62,22 +62,7 @@ pub async fn source_status(
 
             // Surface real query errors so status telemetry doesn't lie about
             // a healthy zero-row state when the DB is actually broken.
-            let (synced, pending, last_ts): (i64, i64, Option<i64>) = conn.query_row(
-                "SELECT \
-                       COUNT(*), \
-                       SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END), \
-                       MAX(timestamp_ms) \
-                     FROM mem_tree_chunks \
-                     WHERE source_id LIKE ?1",
-                [&prefix],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        r.get(2)?,
-                    ))
-                },
-            )?;
+            let (synced, pending, last_ts) = query_source_counts(conn, &prefix)?;
 
             let now_ms = chrono::Utc::now().timestamp_millis();
             Ok(SourceStatus {
@@ -118,6 +103,32 @@ pub async fn status_list(config: &Config) -> Result<Vec<SourceStatus>, String> {
         }
     }
     Ok(out)
+}
+
+fn query_source_counts(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+) -> rusqlite::Result<(i64, i64, Option<i64>)> {
+    conn.query_row(
+        "SELECT \
+               COUNT(*), \
+               SUM(CASE WHEN NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM mem_tree_chunk_embeddings e \
+                   WHERE e.chunk_id = c.id \
+               ) THEN 1 ELSE 0 END), \
+               MAX(c.timestamp_ms) \
+             FROM mem_tree_chunks c \
+             WHERE c.source_id LIKE ?1",
+        [prefix],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get(2)?,
+            ))
+        },
+    )
 }
 
 /// Build the `source_id LIKE` prefix that matches chunks belonging to a source.
@@ -188,5 +199,53 @@ mod tests {
         entry.kind = SourceKind::Composio;
         entry.toolkit = Some("gmail".into());
         assert_eq!(source_id_prefix(&entry), "gmail:%");
+    }
+
+    #[test]
+    fn source_counts_use_chunk_embeddings_table() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mem_tree_chunks (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                embedding BLOB
+            );
+            CREATE TABLE mem_tree_chunk_embeddings (
+                chunk_id TEXT NOT NULL,
+                model_signature TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                dim INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (chunk_id, model_signature)
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO mem_tree_chunks (id, source_id, timestamp_ms, embedding)
+             VALUES ('chunk_with_external_vector', 'mem_src:src_abc:file.md', 1000, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mem_tree_chunks (id, source_id, timestamp_ms, embedding)
+             VALUES ('chunk_without_vector', 'mem_src:src_abc:other.md', 2000, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mem_tree_chunk_embeddings
+             (chunk_id, model_signature, vector, dim, created_at)
+             VALUES ('chunk_with_external_vector', 'bge-m3@1024', x'00000000', 1024, 1.0)",
+            [],
+        )
+        .unwrap();
+
+        let (synced, pending, last_ts) = query_source_counts(&conn, "mem_src:src_abc:%").unwrap();
+
+        assert_eq!(synced, 2);
+        assert_eq!(pending, 1);
+        assert_eq!(last_ts, Some(2000));
     }
 }

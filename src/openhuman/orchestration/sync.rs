@@ -12,6 +12,7 @@
 //! forwarded turns are never re-inserted — only turns it is missing (e.g.
 //! authored on another device) are pulled in.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -23,6 +24,7 @@ use super::store;
 use super::types::{ChatKind, OrchestrationMessage, OrchestrationSession};
 
 const LOG: &str = "orchestration";
+static STEERING_READ_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// `kv` key: `"1"` when the last sync reached the hosted brain, `"0"` when not.
 pub const REACHABLE_KEY: &str = "orch:cloud_reachable";
@@ -214,18 +216,36 @@ pub async fn sync_reads(config: &Config) -> bool {
         });
     }
 
-    // Steering summary for the status surface (best-effort).
-    if let Ok(data) = pass.fetch_steering().await {
-        let steering_cache = data.get("active").filter(|a| !a.is_null()).map(|active| {
-            json!({
-                "text": active.get("directive").and_then(|v| v.as_str()).unwrap_or(""),
-                "maxCycles": active.get("maxCycles").and_then(|v| v.as_i64()).unwrap_or(0),
-            })
-        });
-        let _ = store::with_connection(&config.workspace_dir, |c| match &steering_cache {
-            Some(v) => store::kv_set(c, STEERING_KEY, &v.to_string()),
-            None => store::kv_delete(c, STEERING_KEY),
-        });
+    // Steering summary for the status surface (best-effort). Some hosted
+    // backends do not expose this optional/retired read surface; after the first
+    // typed 404, skip it for this process instead of polling and logging every
+    // sync tick.
+    if !STEERING_READ_DISABLED.load(Ordering::Relaxed) {
+        match pass.fetch_steering().await {
+            Ok(data) => {
+                let steering_cache = data.get("active").filter(|a| !a.is_null()).map(|active| {
+                    json!({
+                        "text": active.get("directive").and_then(|v| v.as_str()).unwrap_or(""),
+                        "maxCycles": active.get("maxCycles").and_then(|v| v.as_i64()).unwrap_or(0),
+                    })
+                });
+                let _ = store::with_connection(&config.workspace_dir, |c| match &steering_cache {
+                    Some(v) => store::kv_set(c, STEERING_KEY, &v.to_string()),
+                    None => store::kv_delete(c, STEERING_KEY),
+                });
+            }
+            Err(e) if e.starts_with("ORCHESTRATION_STEERING_UNAVAILABLE:") => {
+                STEERING_READ_DISABLED.store(true, Ordering::Relaxed);
+                let _ = store::with_connection(&config.workspace_dir, |c| {
+                    store::kv_delete(c, STEERING_KEY)
+                });
+                log::info!(
+                    target: LOG,
+                    "[orchestration] sync.steering_disabled endpoint_unavailable"
+                );
+            }
+            Err(_) => {}
+        }
     }
 
     true

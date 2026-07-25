@@ -1,7 +1,7 @@
 use super::{
     backend_api_body_shape, flatten_authed_error, is_announcements_latest_path,
-    key_bytes_from_string, parse_message_path, sanitize_client_version, BackendApiError,
-    BackendOAuthClient, BACKEND_API_BODY_SHAPE_MAX_BYTES,
+    is_orchestration_steering_path, key_bytes_from_string, parse_message_path,
+    sanitize_client_version, BackendApiError, BackendOAuthClient, BACKEND_API_BODY_SHAPE_MAX_BYTES,
 };
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -826,6 +826,42 @@ fn is_announcements_latest_path_rejects_other_paths() {
     assert!(!is_announcements_latest_path("/auth/profile"));
     assert!(!is_announcements_latest_path("/"));
     assert!(!is_announcements_latest_path(""));
+}
+
+#[test]
+fn is_orchestration_steering_path_matches_canonical_form() {
+    assert!(is_orchestration_steering_path("/orchestration/v1/steering"));
+}
+
+#[test]
+fn is_orchestration_steering_path_tolerates_base_path_prefix() {
+    assert!(is_orchestration_steering_path(
+        "/api/orchestration/v1/steering"
+    ));
+    assert!(is_orchestration_steering_path(
+        "/v2/api/orchestration/v1/steering"
+    ));
+}
+
+#[test]
+fn is_orchestration_steering_path_rejects_other_paths() {
+    assert!(!is_orchestration_steering_path(
+        "/orchestration/v1/steering/extra"
+    ));
+    assert!(!is_orchestration_steering_path(
+        "/orchestration/v1/sessions"
+    ));
+    assert!(!is_orchestration_steering_path("/auth/profile"));
+    assert!(!is_orchestration_steering_path("/"));
+    assert!(!is_orchestration_steering_path(""));
+}
+
+#[test]
+fn flatten_authed_error_maps_orchestration_steering_unavailable() {
+    let msg = flatten_authed_error(anyhow::Error::new(
+        BackendApiError::OrchestrationSteeringUnavailable,
+    ));
+    assert!(msg.starts_with("ORCHESTRATION_STEERING_UNAVAILABLE:"));
 }
 
 // ── authed_json defense-in-depth: PATCH 404 with base-path prefix ───────────

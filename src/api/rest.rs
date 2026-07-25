@@ -49,6 +49,11 @@ pub enum BackendApiError {
     /// re-wrap) — one failure reported at two layers, ~452 events / 19 users.
     #[error("no announcement available (404 on /announcements/latest)")]
     AnnouncementNotFound,
+    /// `GET /orchestration/v1/steering` returned 404. The hosted steering read
+    /// surface is optional/retired on some backends; callers should stop polling
+    /// it for this process and keep rendering from local cache.
+    #[error("orchestration steering endpoint unavailable (404 on /orchestration/v1/steering)")]
+    OrchestrationSteeringUnavailable,
 }
 
 /// Flatten an `authed_json` error onto the JSON-RPC `String` channel.
@@ -75,6 +80,9 @@ pub fn flatten_authed_error(err: anyhow::Error) -> String {
     match err.downcast_ref::<BackendApiError>() {
         Some(BackendApiError::Unauthorized { method, path }) => {
             format!("SESSION_EXPIRED: backend rejected session token on {method} {path}")
+        }
+        Some(BackendApiError::OrchestrationSteeringUnavailable) => {
+            "ORCHESTRATION_STEERING_UNAVAILABLE: hosted steering endpoint returned 404".to_string()
         }
         _ => format!("{err:#}"),
     }
@@ -111,6 +119,21 @@ fn parse_message_path(path: &str) -> Option<(&str, &str)> {
 fn is_announcements_latest_path(path: &str) -> bool {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     matches!(segments.as_slice(), [.., "announcements", "latest"])
+}
+
+/// `true` when `path` is `/orchestration/v1/steering`, tolerant of an arbitrary
+/// base-path prefix. This read surface is optional on older/retired hosted
+/// orchestration backends, so a 404 here should not become observability noise.
+fn is_orchestration_steering_path(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(segments.as_slice(), [.., "orchestration", "v1", "steering"])
+}
+
+pub fn is_orchestration_steering_unavailable(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<BackendApiError>(),
+        Some(BackendApiError::OrchestrationSteeringUnavailable)
+    )
 }
 
 const CLIENT_VERSION_HEADER_MAX_LEN: usize = 64;
@@ -737,6 +760,23 @@ impl BackendOAuthClient {
                         url.path(),
                     );
                     return Err(anyhow::Error::new(BackendApiError::AnnouncementNotFound));
+                }
+
+                // 404 on the hosted orchestration steering read surface means this
+                // backend does not expose the optional/retired endpoint. The sync
+                // loop will stop polling it for the current process; do not report
+                // it as a code bug every 20 seconds.
+                if method == Method::GET && is_orchestration_steering_path(url.path()) {
+                    tracing::info!(
+                        domain = "backend_api",
+                        operation = "authed_json",
+                        "[backend_api] orchestration-steering 404 on {} {} — surfacing typed unavailable",
+                        method.as_str(),
+                        url.path(),
+                    );
+                    return Err(anyhow::Error::new(
+                        BackendApiError::OrchestrationSteeringUnavailable,
+                    ));
                 }
             }
 

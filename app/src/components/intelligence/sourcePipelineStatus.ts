@@ -12,7 +12,7 @@
  * verdict so the row can honestly say "Ingested only" instead of "synced":
  *
  * 1. **Per-source, precise** — `SourceStatus.chunks_pending` is the SQL count
- *    of this source's chunks whose `embedding IS NULL` (see
+ *    of this source's chunks with no row in `mem_tree_chunk_embeddings` (see
  *    `memory_sources/status.rs`). `> 0` in a settled state means those chunks
  *    were stored WITHOUT vectors → semantic search can't reach them.
  * 2. **Global pipeline health** — `memory_tree_pipeline_status` (the same RPC

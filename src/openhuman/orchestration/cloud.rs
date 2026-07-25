@@ -237,6 +237,13 @@ impl ReadPass {
                 Ok(data)
             }
             Err(err) => {
+                if crate::api::rest::is_orchestration_steering_unavailable(&err) {
+                    log::info!(
+                        target: LOG,
+                        "[orchestration] cloud.read.optional_unavailable {label}"
+                    );
+                    return Err(crate::api::flatten_authed_error(err));
+                }
                 let msg = crate::api::flatten_authed_error(err);
                 log::warn!(target: LOG, "[orchestration] cloud.read.fail {label} err={msg}");
                 Err(msg)

@@ -615,8 +615,9 @@ impl QueueDelegates for HostQueueDelegates {
         // Phase 1: up to BATCH ids lacking a sidecar vector at the active
         // signature (excluding persistently-tombstoned rows) — chunks first,
         // then summaries to fill the batch.
-        let (chunk_ids, summary_ids): (Vec<String>, Vec<String>) =
-            chunk_store::with_connection(config, |conn| {
+        let (chunk_ids, summary_ids): (Vec<String>, Vec<String>) = chunk_store::with_connection(
+            config,
+            |conn| {
                 let chunks: Vec<String> = {
                     let mut stmt = conn.prepare(
                         "SELECT id FROM mem_tree_chunks c
@@ -625,7 +626,9 @@ impl QueueDelegates for HostQueueDelegates {
                                WHERE e.chunk_id = c.id AND e.model_signature = ?1)
                             AND NOT EXISTS (
                               SELECT 1 FROM mem_tree_chunk_reembed_skipped s
-                               WHERE s.chunk_id = c.id AND s.model_signature = ?1)
+                               WHERE s.chunk_id = c.id AND s.model_signature = ?1
+                                 AND s.reason NOT LIKE 'body read failed: no content pointer or raw refs for chunk %'
+                                 AND s.reason NOT LIKE 'body read failed: empty content pointer and no raw refs for chunk %')
                           LIMIT ?2",
                     )?;
                     let ids = stmt
@@ -659,7 +662,8 @@ impl QueueDelegates for HostQueueDelegates {
                     ids
                 };
                 Ok((chunks, summaries))
-            })?;
+            },
+        )?;
 
         if chunk_ids.is_empty() && summary_ids.is_empty() {
             return Ok(ReembedProgress::Covered);
